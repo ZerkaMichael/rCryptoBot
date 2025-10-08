@@ -127,14 +127,8 @@ async function checkWhaleActivity(symbol, currentData) {
     const activities = [];
     const marketCap = currentData.marketCap || 0;
 
-    if (marketCap > 1000000000) {
-      activities.push({
-        type: 'institutional_interest',
-        severity: marketCap > 10000000000 ? 'high' : 'medium',
-        description: `${symbol} has $${formatNumber(marketCap)} market cap - likely attracting institutional interest. Large holders may be accumulating.`,
-        impact: marketCap > 10000000000 ? 'High' : 'Medium'
-      });
-    }
+    // Removed generic "institutional interest" alert - not actionable enough
+    // Market cap is already shown in price data
 
     const marketCapChange = currentData.marketCapChange24h || 0;
     if (Math.abs(marketCapChange) > 10) {

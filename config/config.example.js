@@ -3,6 +3,7 @@ module.exports = {
   // API Keys - REQUIRED
   TELEGRAM_TOKEN: 'YOUR_TELEGRAM_BOT_TOKEN_HERE',
   OPENAI_API_KEY: 'YOUR_OPENAI_API_KEY_HERE',
+  TWITTER_BEARER_TOKEN: null, // OPTIONAL: Add Twitter API Bearer Token for Twitter/X news integration
   
   // API Endpoints
   COINGECKO_API: 'https://api.coingecko.com/api/v3',

@@ -2,7 +2,7 @@
 
 A professional-grade Telegram bot for cryptocurrency monitoring, real-time price alerts, and AI-powered market analysis.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D14.0.0-brightgreen)
 ![License](https://img.shields.io/badge/license-ISC-green)
 
@@ -17,14 +17,16 @@ A professional-grade Telegram bot for cryptocurrency monitoring, real-time price
 ### 🔔 Intelligent Alert System
 - **Custom price alerts** - Get notified when your target price is hit
 - **Auto-volatility alerts** - Automatic 3% move notifications
-- **Smart cooldown** - 1-hour between alerts per coin (no spam!)
-- **Clean notifications** - Only useful information, no clutter
+- **Smart cooldown** - 1-hour between alerts per coin
+- **Clean notifications** - Only useful information
 
 ### 📰 AI-Powered News Briefings
-- **Premium Reddit filtering** - Only high-quality posts (50+ upvotes)
+- **Multi-source aggregation** - Reddit, CryptoCompare, CryptoPanic, RSS feeds, Google News, and Twitter/X
+- **Premium filtering** - Only high-quality, verified sources
 - **Meme detection** - Automatically filters out spam and low-quality content
-- **ChatGPT analysis** - AI-generated professional briefings
-- **Quality scoring** - Advanced algorithm ranks news by relevance
+- **ChatGPT analysis** - AI-generated professional briefings from all sources
+- **Quality scoring** - Advanced algorithm ranks news by relevance and recency
+- **Duplicate removal** - Smart deduplication across all sources
 
 ### 📊 Market Activity Detection
 - **Volume anomalies** - Detect unusual trading patterns
@@ -62,8 +64,11 @@ cp config/config.example.js config/config.js
 Edit `config/config.js` and add your API keys:
 ```javascript
 TELEGRAM_TOKEN: 'your-telegram-bot-token',
-OPENAI_API_KEY: 'your-openai-api-key'
+OPENAI_API_KEY: 'your-openai-api-key',
+TWITTER_BEARER_TOKEN: null  // Optional: Add for Twitter/X news integration
 ```
+
+> **Note:** Twitter/X integration is optional. The bot will work without it, using other news sources.
 
 4. **Run the bot**
 ```bash
@@ -124,10 +129,13 @@ Bot: 📊 HYPE PREMIUM BRIEFING
      ⭐ PREMIUM DATA QUALITY DASHBOARD
      • Data Quality: premium
      • Market Activity: High
-     • Premium Sources: 13
+     • News Volume: High
+     • Community Engagement: Very High
+     • Premium Sources: 18
      
      EXECUTIVE SUMMARY:
      Hyperliquid's Perp DEX dominates with high revenue...
+     Major partnerships announced...
      
      🚨 UNUSUAL MARKET ACTIVITY ALERT
      
@@ -136,6 +144,10 @@ Bot: 📊 HYPE PREMIUM BRIEFING
      1. +3.45% ($2,450,000 vol) 2h ago
      2. +2.87% ($1,890,000 vol) 7h ago
      3. +2.15% ($1,345,000 vol) 15h ago
+     
+     📊 DATA SOURCES
+     • Reddit: 5 | News: 10 | Twitter: 3
+     • CryptoCompare: 4 | CryptoPanic: 3 | RSS: 2 | Google: 1
 ```
 
 ### Auto-Volatility Alerts
@@ -201,10 +213,20 @@ bot.js (36 lines)           ← Entry point
 - **Force Refresh**: Always uses latest prices for accuracy
 
 ### News System
-- **Sources**: Reddit (7 premium subreddits)
-- **Quality Filters**: 50+ upvotes, 15+ comments, >0.75 upvote ratio
-- **Meme Detection**: Removes pump/dump/moon spam
-- **AI Analysis**: ChatGPT GPT-3.5-Turbo for professional briefings
+- **Sources**: 
+  - **Reddit**: 7 premium subreddits (cryptocurrency, CryptoMarkets, Bitcoin, ethereum, defi, etc.)
+  - **CryptoCompare News API**: Real-time crypto news aggregator
+  - **CryptoPanic**: Multi-source crypto news platform
+  - **RSS Feeds**: CoinDesk, CoinTelegraph, Decrypt, CryptoSlate
+  - **Google News**: General cryptocurrency coverage
+  - **Twitter/X**: High-engagement tweets (optional, requires API key)
+- **Quality Filters**: 
+  - Reddit: 50+ upvotes, 15+ comments, >0.75 upvote ratio
+  - Twitter: 10+ likes or 5+ retweets minimum
+  - News: Recency scoring, source reputation weighting
+- **Meme Detection**: Removes pump/dump/moon spam and low-quality content
+- **Duplicate Removal**: Smart title-based deduplication across all sources
+- **AI Analysis**: ChatGPT GPT-3.5-Turbo synthesizes insights from all sources
 - **Activity Detection**: 8 different market anomaly checks
 
 ### Activity Detection
@@ -272,12 +294,20 @@ Contributions welcome! Please:
 
 ## 📝 Changelog
 
+### Version 1.1.0 (October 2025)
+- ✅ **Expanded news sources**: Added CryptoCompare, CryptoPanic, RSS feeds, Google News
+- ✅ **Twitter/X integration**: Optional high-engagement tweet monitoring
+- ✅ **Multi-source aggregation**: News from 6+ different sources
+- ✅ **Smart deduplication**: Removes duplicate news across all sources
+- ✅ **Enhanced quality scoring**: Advanced algorithm for news ranking
+- ✅ **Source breakdown**: Detailed reporting of news source contributions
+
 ### Version 1.0.0 (October 2025)
 - ✅ Initial release
 - ✅ Real-time price feeds with multi-source fallback
 - ✅ Custom price alerts
 - ✅ Auto-volatility monitoring (3% moves)
-- ✅ AI-powered news briefings
+- ✅ AI-powered news briefings (Reddit only)
 - ✅ Market activity detection
 - ✅ Modular architecture
 - ✅ Top 3 buys & sells tracking
@@ -289,11 +319,15 @@ ISC License - See LICENSE file for details
 
 ## 🙏 Acknowledgments
 
-- **CryptoCompare** - Primary price data source
+- **CryptoCompare** - Primary price data source & crypto news API
 - **CoinCap** - Fallback price data
 - **CoinGecko** - Comprehensive crypto data
 - **OpenAI** - ChatGPT-powered analysis
-- **Reddit** - Community discussions
+- **Reddit** - Community discussions and sentiment
+- **CryptoPanic** - Multi-source news aggregation
+- **CoinDesk, CoinTelegraph, Decrypt, CryptoSlate** - Premium crypto journalism
+- **Google News** - General crypto news coverage
+- **Twitter/X** - Real-time social sentiment (optional)
 
 ## 💬 Support
 
