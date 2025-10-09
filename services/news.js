@@ -3,7 +3,9 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const OpenAI = require('openai');
 const config = require('../config/config');
+const { getCoinGeckoId } = require('../utils/helpers');
 const activityDetector = require('./activityDetector');
+const orderBookSentiment = require('./orderBookSentiment');
 
 // Initialize OpenAI
 const openai = new OpenAI({
@@ -22,9 +24,211 @@ const NEWS_SOURCES = {
   ]
 };
 
+const SYMBOL_CONTEXT_CACHE = new Map();
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildKeywordPatterns(keywords) {
+  return keywords
+    .filter(Boolean)
+    .map((rawKeyword) => {
+      const keyword = rawKeyword.trim();
+      if (!keyword) {
+        return null;
+      }
+
+      const lowerKeyword = keyword.toLowerCase();
+
+      if (lowerKeyword.length <= 4 && !/\s/.test(lowerKeyword)) {
+        const escaped = escapeRegex(lowerKeyword);
+        return new RegExp(`(^|[^a-z0-9])${escaped}(?:\\b|\\/|\\-|usd|usdt|usdc)?`, 'i');
+      }
+
+      const escaped = escapeRegex(lowerKeyword)
+        .replace(/\\\s+/g, '\\s+')
+        .replace(/\\\-+/g, '[\\s\\-]+');
+
+      return new RegExp(`\\b${escaped}\\b`, 'i');
+    })
+    .filter(Boolean);
+}
+
+function buildTwitterKeywords(symbol, name, slug) {
+  const keywords = new Set();
+  const normalizedSymbol = symbol.toUpperCase();
+  const symbolLower = normalizedSymbol.toLowerCase();
+
+  keywords.add(normalizedSymbol);
+  keywords.add(symbolLower);
+  keywords.add(`#${symbolLower}`);
+  keywords.add(`$${normalizedSymbol}`);
+  keywords.add(`${symbolLower}/usd`);
+  keywords.add(`${symbolLower}-usd`);
+
+  if (name) {
+    keywords.add(name);
+    keywords.add(name.toLowerCase());
+  }
+
+  if (slug) {
+    keywords.add(slug);
+    keywords.add(slug.replace(/-/g, ' '));
+  }
+
+  return Array.from(keywords).filter(Boolean).slice(0, 8);
+}
+
+async function getSymbolContext(symbol) {
+  const cacheKey = symbol.toUpperCase();
+  if (SYMBOL_CONTEXT_CACHE.has(cacheKey)) {
+    return SYMBOL_CONTEXT_CACHE.get(cacheKey);
+  }
+
+  const slug = getCoinGeckoId(symbol, config.SYMBOL_MAP);
+  const keywords = new Set();
+  keywords.add(symbol.toLowerCase());
+
+  if (slug) {
+    keywords.add(slug.toLowerCase());
+    if (slug.includes('-')) {
+      keywords.add(slug.replace(/-/g, ' '));
+      slug.split('-').forEach((part) => {
+        if (part.length > 2) {
+          keywords.add(part.toLowerCase());
+        }
+      });
+    }
+  }
+
+  let primaryName = '';
+
+  if (slug) {
+    try {
+      const response = await axios.get(`${config.COINGECKO_API}/coins/${slug}`, {
+        params: {
+          localization: false,
+          tickers: false,
+          market_data: false,
+          community_data: false,
+          developer_data: false,
+          sparkline: false
+        },
+        timeout: 5000
+      });
+
+      const coinData = response.data;
+      if (coinData) {
+        if (coinData.name) {
+          primaryName = coinData.name;
+          keywords.add(coinData.name.toLowerCase());
+          coinData.name
+            .toLowerCase()
+            .split(/\s+/)
+            .forEach((part) => {
+              if (part.length > 3) {
+                keywords.add(part);
+              }
+            });
+        }
+
+        if (coinData.symbol) {
+          keywords.add(coinData.symbol.toLowerCase());
+        }
+
+        if (Array.isArray(coinData.categories)) {
+          coinData.categories.forEach((category) => {
+            if (category) {
+              const normalizedCategory = category.toLowerCase();
+              if (
+                normalizedCategory.includes(slug.toLowerCase()) ||
+                (primaryName && normalizedCategory.includes(primaryName.toLowerCase()))
+              ) {
+                keywords.add(normalizedCategory);
+              }
+            }
+          });
+        }
+      }
+    } catch (error) {
+      console.log(`Error fetching symbol context for ${symbol}:`, error.message);
+    }
+  }
+
+  const keywordList = Array.from(keywords).filter(Boolean);
+  const context = {
+    symbol: cacheKey,
+    coinId: slug,
+    name: primaryName || cacheKey,
+    keywords: keywordList,
+    keywordPatterns: buildKeywordPatterns(keywordList),
+    twitterKeywords: buildTwitterKeywords(cacheKey, primaryName, slug)
+  };
+  context.primarySearchTerm = primaryName || (slug ? slug.replace(/-/g, ' ') : cacheKey);
+
+  SYMBOL_CONTEXT_CACHE.set(cacheKey, context);
+  return context;
+}
+
+function matchesSymbolText(text, symbolContext) {
+  if (!text || !symbolContext) {
+    return false;
+  }
+
+  return symbolContext.keywordPatterns.some((pattern) => pattern.test(text));
+}
+
+function formatLiquidityNumber(value) {
+  if (!Number.isFinite(value) || value === 0) {
+    return '0';
+  }
+  const absValue = Math.abs(value);
+  if (absValue >= 1e9) {
+    return `${(value / 1e9).toFixed(2)}B`;
+  }
+  if (absValue >= 1e6) {
+    return `${(value / 1e6).toFixed(2)}M`;
+  }
+  if (absValue >= 1e3) {
+    return `${(value / 1e3).toFixed(2)}K`;
+  }
+  if (absValue >= 1) {
+    return value.toFixed(2);
+  }
+  return value.toPrecision(2);
+}
+
+function formatOrderBookPrice(value) {
+  if (!Number.isFinite(value)) {
+    return 'N/A';
+  }
+  if (Math.abs(value) >= 100) {
+    return value.toFixed(2);
+  }
+  if (Math.abs(value) >= 1) {
+    return value.toFixed(4);
+  }
+  return value.toPrecision(4);
+}
+
+function formatOrderBookQuantity(value) {
+  if (!Number.isFinite(value)) {
+    return 'N/A';
+  }
+  if (value >= 1000) {
+    return value.toFixed(0);
+  }
+  if (value >= 1) {
+    return value.toFixed(2);
+  }
+  return value.toPrecision(3);
+}
+
 // Get quality Reddit news
-async function getQualityRedditNews(symbol) {
+async function getQualityRedditNews(symbol, symbolContext) {
   try {
+    const context = symbolContext || await getSymbolContext(symbol);
     const premiumSubreddits = [
       { name: 'cryptocurrency', quality: 8, minScore: 100, minComments: 20 },
       { name: 'CryptoMarkets', quality: 10, minScore: 50, minComments: 15 },
@@ -34,10 +238,30 @@ async function getQualityRedditNews(symbol) {
       { name: 'CryptoCurrencyTrading', quality: 7, minScore: 40, minComments: 10 },
       { name: symbol.toLowerCase(), quality: 6, minScore: 30, minComments: 5 }
     ];
+
+    if (context.coinId) {
+      const coinIdSub = context.coinId.replace(/-/g, '');
+      premiumSubreddits.push({ name: coinIdSub, quality: 6, minScore: 20, minComments: 5 });
+    }
+    if (context.name && context.name.length < 25) {
+      const nameSub = context.name.replace(/\s+/g, '');
+      premiumSubreddits.push({ name: nameSub.toLowerCase(), quality: 6, minScore: 20, minComments: 5 });
+    }
+
+    const subredditQueue = [];
+    const seenSubreddits = new Set();
+    premiumSubreddits.forEach((subredditInfo) => {
+      const key = subredditInfo.name?.toLowerCase();
+      if (!key || seenSubreddits.has(key)) {
+        return;
+      }
+      seenSubreddits.add(key);
+      subredditQueue.push(subredditInfo);
+    });
     
     const qualityNewsItems = [];
     
-    for (const subredditInfo of premiumSubreddits) {
+    for (const subredditInfo of subredditQueue) {
       const subreddit = subredditInfo.name;
       try {
         const [hotResponse, topResponse] = await Promise.all([
@@ -58,9 +282,11 @@ async function getQualityRedditNews(symbol) {
         
         for (const post of allPosts) {
           const postData = post.data;
+          const matchesSymbol = matchesSymbolText(postData.title, context) ||
+                                matchesSymbolText(postData.selftext, context);
           
-          if (postData.title && 
-              postData.title.toLowerCase().includes(symbol.toLowerCase()) &&
+          if (postData.title &&
+              matchesSymbol &&
               postData.score >= subredditInfo.minScore &&
               postData.num_comments >= subredditInfo.minComments &&
               !postData.over_18 &&
@@ -215,8 +441,9 @@ async function getRedditPostContent(permalink) {
 }
 
 // Get news from CryptoCompare API
-async function getCryptoCompareNews(symbol) {
+async function getCryptoCompareNews(symbol, symbolContext) {
   try {
+    const context = symbolContext || await getSymbolContext(symbol);
     const response = await axios.get(`${NEWS_SOURCES.CRYPTOCOMPARE}?lang=EN`, {
       timeout: 5000,
       headers: { 'User-Agent': 'rCryptoBot/1.0' }
@@ -225,14 +452,10 @@ async function getCryptoCompareNews(symbol) {
     if (response.data && response.data.Data) {
       const relevantNews = response.data.Data
         .filter(article => {
-          const title = article.title?.toLowerCase() || '';
-          const body = article.body?.toLowerCase() || '';
-          const categories = article.categories?.toLowerCase() || '';
-          const symbolLower = symbol.toLowerCase();
-          
-          return title.includes(symbolLower) || 
-                 body.includes(symbolLower) || 
-                 categories.includes(symbolLower);
+          const categories = article.categories?.replace(/\|/g, ' ') || '';
+          return matchesSymbolText(article.title, context) ||
+                 matchesSymbolText(article.body, context) ||
+                 matchesSymbolText(categories, context);
         })
         .slice(0, 5)
         .map(article => ({
@@ -255,17 +478,24 @@ async function getCryptoCompareNews(symbol) {
 }
 
 // Get news from CryptoPanic API v2
-async function getCryptoPanicNews(symbol) {
+async function getCryptoPanicNews(symbol, symbolContext) {
   try {
     // CryptoPanic requires API key - skip if not configured
     if (!config.CRYPTOPANIC_API_KEY) {
       return [];
     }
+
+    const context = symbolContext || await getSymbolContext(symbol);
+    const currencies = new Set();
+    currencies.add(symbol.toLowerCase());
+    if (context.coinId) {
+      currencies.add(context.coinId.toLowerCase());
+    }
     
     const response = await axios.get(`${NEWS_SOURCES.CRYPTOPANIC}/posts/`, {
       params: {
         auth_token: config.CRYPTOPANIC_API_KEY,
-        currencies: symbol.toUpperCase(),
+        currencies: Array.from(currencies).join(','),
         kind: 'news',
         public: 'true'
       },
@@ -275,6 +505,9 @@ async function getCryptoPanicNews(symbol) {
 
     if (response.data && response.data.results) {
       return response.data.results
+        .filter(article => matchesSymbolText(article.title, context) ||
+                           matchesSymbolText(article.description, context) ||
+                           matchesSymbolText(article.metadata?.coins?.map(c => c?.code).join(' '), context))
         .slice(0, 8)
         .map(article => ({
           title: article.title,
@@ -333,8 +566,9 @@ async function parseRSSFeed(feedUrl, feedName) {
 }
 
 // Get news from all RSS feeds
-async function getRSSNews(symbol) {
+async function getRSSNews(symbol, symbolContext) {
   try {
+    const context = symbolContext || await getSymbolContext(symbol);
     const allFeedItems = await Promise.all(
       NEWS_SOURCES.RSS_FEEDS.map(feed => parseRSSFeed(feed.url, feed.name))
     );
@@ -342,12 +576,9 @@ async function getRSSNews(symbol) {
     const combinedItems = allFeedItems.flat();
     
     // Filter for symbol relevance
-    const symbolLower = symbol.toLowerCase();
     const relevantItems = combinedItems.filter(item => {
-      const title = item.title?.toLowerCase() || '';
-      const content = item.content?.toLowerCase() || '';
-      
-      return title.includes(symbolLower) || content.includes(symbolLower);
+      return matchesSymbolText(item.title, context) ||
+             matchesSymbolText(item.content, context);
     });
 
     // Sort by date and return top 8
@@ -362,10 +593,15 @@ async function getRSSNews(symbol) {
 }
 
 // Get Google News for crypto
-async function getGoogleNews(symbol) {
+async function getGoogleNews(symbol, symbolContext) {
   try {
+    const context = symbolContext || await getSymbolContext(symbol);
     // Google News RSS feed for crypto queries
-    const query = encodeURIComponent(`${symbol} cryptocurrency`);
+    const queryTerms = new Set();
+    queryTerms.add(context.primarySearchTerm);
+    queryTerms.add(context.symbol);
+    queryTerms.add('cryptocurrency');
+    const query = encodeURIComponent(Array.from(queryTerms).filter(Boolean).join(' '));
     const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`;
     
     const response = await axios.get(rssUrl, {
@@ -397,7 +633,7 @@ async function getGoogleNews(symbol) {
       }
     });
 
-    return items;
+    return items.filter(item => matchesSymbolText(item.title, context)).slice(0, 8);
   } catch (error) {
     console.log('Error fetching Google News:', error.message);
     return [];
@@ -405,12 +641,14 @@ async function getGoogleNews(symbol) {
 }
 
 // Get X (Twitter) news - optimized single search to avoid rate limits
-async function getTwitterNews(symbol) {
+async function getTwitterNews(symbol, symbolContext) {
   try {
     // Check if X API credentials are configured
     if (!config.TWITTER_BEARER_TOKEN) {
       return [];
     }
+
+    const context = symbolContext || await getSymbolContext(symbol);
 
     // Whale and flow monitoring accounts
     const whaleAccounts = [
@@ -426,7 +664,11 @@ async function getTwitterNews(symbol) {
     const allTweets = [];
 
     // Single combined search: Prioritize whale accounts with flow keywords
-    const combinedQuery = `${symbol} (from:${whaleAccounts.join(' OR from:')}) -is:retweet lang:en`;
+    const keywordQuery = context.twitterKeywords.length > 0
+      ? context.twitterKeywords.map(term => `"${term}"`).join(' OR ')
+      : symbol;
+    const authorQuery = whaleAccounts.map(account => `from:${account}`).join(' OR ');
+    const combinedQuery = `(${keywordQuery}) (${authorQuery}) -is:retweet lang:en`;
     
     try {
       const response = await axios.get('https://api.twitter.com/2/tweets/search/recent', {
@@ -454,6 +696,10 @@ async function getTwitterNews(symbol) {
         response.data.data.forEach(tweet => {
           const author = users[tweet.author_id] || {};
           const isWhaleAccount = whaleAccounts.includes(author.username);
+          const matchesQuery = matchesSymbolText(tweet.text, context) || matchesSymbolText(author.username, context);
+          if (!matchesQuery) {
+            return;
+          }
           
           allTweets.push({
             title: `${isWhaleAccount ? '🐋 ' : ''}@${author.username}: ${tweet.text.substring(0, 100)}...`,
@@ -548,8 +794,10 @@ function calculateNewsQualityScore(newsItem) {
 
 // Aggregate all news sources
 async function aggregateQualityNews(symbol, getCachedCryptoData) {
+  let symbolContext;
   try {
     console.log(`Aggregating high-quality news from multiple sources for ${symbol}...`);
+    symbolContext = await getSymbolContext(symbol);
 
     // Fetch from all sources in parallel
     const [
@@ -559,14 +807,16 @@ async function aggregateQualityNews(symbol, getCachedCryptoData) {
       rssNews,
       googleNews,
       twitterNews,
+      orderBookData,
       unusualActivity
     ] = await Promise.all([
-      getQualityRedditNews(symbol),
-      getCryptoCompareNews(symbol),
-      getCryptoPanicNews(symbol),
-      getRSSNews(symbol),
-      getGoogleNews(symbol),
-      getTwitterNews(symbol),
+      getQualityRedditNews(symbol, symbolContext),
+      getCryptoCompareNews(symbol, symbolContext),
+      getCryptoPanicNews(symbol, symbolContext),
+      getRSSNews(symbol, symbolContext),
+      getGoogleNews(symbol, symbolContext),
+      getTwitterNews(symbol, symbolContext),
+      orderBookSentiment.analyzeOrderBook(symbol),
       activityDetector.detectUnusualActivity(symbol, getCachedCryptoData)
     ]);
 
@@ -595,10 +845,12 @@ async function aggregateQualityNews(symbol, getCachedCryptoData) {
       general: sortedGeneralNews,
       twitter: twitterNews,
       unusualActivity: unusualActivity,
+      orderBookSentiment: orderBookData,
       timestamp: new Date(),
       totalQualitySources: totalSources,
       dataQuality: totalSources > 5 ? 'premium' : totalSources > 2 ? 'good' : 'limited',
       activityDetected: unusualActivity.length > 0,
+      symbolContext,
       sourceBreakdown: {
         reddit: qualityReddit.length,
         cryptoCompare: cryptoCompareNews.length,
@@ -615,10 +867,12 @@ async function aggregateQualityNews(symbol, getCachedCryptoData) {
       general: [],
       twitter: [],
       unusualActivity: [],
+      orderBookSentiment: null,
       timestamp: new Date(),
       totalQualitySources: 0,
       dataQuality: 'limited',
       activityDetected: false,
+      symbolContext,
       error: 'Failed to fetch some premium news sources'
     };
   }
@@ -655,6 +909,10 @@ function removeDuplicateNews(newsItems) {
 // Get AI-powered comprehensive briefing
 async function getComprehensiveBriefing(newsData, symbol) {
   try {
+    const symbolContext = newsData.symbolContext || await getSymbolContext(symbol);
+    const assetName = symbolContext?.name || symbol;
+    const displayLabel = assetName && assetName.toUpperCase() !== symbol ? `${assetName} (${symbol})` : symbol;
+    const contextIdentifiers = [symbol, assetName, symbolContext?.coinId].filter(Boolean).map(value => value.toString()).join(', ');
     const contentSections = [];
     
     // Add general news from multiple sources
@@ -724,9 +982,22 @@ async function getComprehensiveBriefing(newsData, symbol) {
       });
     }
     
+    if (newsData.orderBookSentiment) {
+      const depth = newsData.orderBookSentiment;
+      contentSections.push("\n\n=== ORDER BOOK LIQUIDITY SNAPSHOT ===");
+      contentSections.push(`Exchange: ${depth.exchange} | Pair: ${depth.pair}`);
+      contentSections.push(`Sentiment: ${depth.sentiment} | Imbalance: ${(depth.imbalance * 100).toFixed(2)}%`);
+      contentSections.push(`Bid Liquidity: $${formatLiquidityNumber(depth.bidVolumeUsd)} | Ask Liquidity: $${formatLiquidityNumber(depth.askVolumeUsd)}`);
+      if (depth.spreadPercent !== null && depth.spreadPercent !== undefined) {
+        contentSections.push(`Spread: ${(depth.spreadPercent * 100).toFixed(3)}%`);
+      }
+      contentSections.push(`Top Bid: ${formatOrderBookPrice(depth.topBid.price)} (${formatOrderBookQuantity(depth.topBid.quantity)})`);
+      contentSections.push(`Top Ask: ${formatOrderBookPrice(depth.topAsk.price)} (${formatOrderBookQuantity(depth.topAsk.quantity)})`);
+    }
+    
     if (contentSections.length === 0) {
       return {
-        briefing: `No recent news or discussions found for ${symbol}.`,
+        briefing: `No recent news or discussions found for ${displayLabel}.`,
         totalSources: 0,
         analysis: {
           marketActivity: 'Low',
@@ -738,33 +1009,34 @@ async function getComprehensiveBriefing(newsData, symbol) {
     
     const fullContent = contentSections.join('\n');
     
-    const prompt = `You are a senior cryptocurrency market analyst. Analyze the following data SPECIFICALLY about ${symbol} cryptocurrency:
+    const prompt = `You are a senior cryptocurrency market analyst. Analyze the following data SPECIFICALLY about ${displayLabel} cryptocurrency.
+Identifiers to keep in mind: ${contextIdentifiers}.
 
 ${fullContent}
 
-CRITICAL: Focus ONLY on information directly related to ${symbol}. Ignore any mentions of other cryptocurrencies unless they directly impact ${symbol}.
+CRITICAL: Focus ONLY on information directly related to ${displayLabel}. Ignore any mentions of other cryptocurrencies unless they directly impact ${displayLabel}.
 
 Provide a CONCISE briefing in this format:
 
 EXECUTIVE SUMMARY:
-[2-3 sentences about ${symbol} ONLY - key price movements, major developments, whale activity]
+[2-3 sentences about ${displayLabel} ONLY - key price movements, major developments, whale activity]
 
 KEY DEVELOPMENTS:
-• [${symbol}-specific development 1]
-• [${symbol}-specific development 2]
-• [${symbol}-specific development 3]
-• [${symbol}-specific development 4]
+• [${displayLabel}-specific development 1]
+• [${displayLabel}-specific development 2]
+• [${displayLabel}-specific development 3]
+• [${displayLabel}-specific development 4]
 
 MARKET ACTIVITY:
-[Describe ${symbol}'s unusual activity, exchange flows, whale movements if detected]
+[Describe ${displayLabel}'s unusual activity, exchange flows, whale movements if detected]
 
 COMMUNITY INSIGHTS:
-[What sophisticated investors are saying specifically about ${symbol}]
+[What sophisticated investors are saying specifically about ${displayLabel}]
 
 OUTLOOK:
-[Professional assessment for ${symbol} - key levels to watch, potential catalysts]
+[Professional assessment for ${displayLabel} - key levels to watch, potential catalysts]
 
-Keep it under 1500 characters total. DO NOT mention other cryptocurrencies unless they directly affect ${symbol}.`;
+Keep it under 1500 characters total. DO NOT mention other cryptocurrencies unless they directly affect ${displayLabel}.`;
 
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
@@ -787,7 +1059,8 @@ Keep it under 1500 characters total. DO NOT mention other cryptocurrencies unles
     const analysis = {
       marketActivity: determineMarketActivity(newsData),
       newsVolume: newsData.general?.length > 2 ? 'High' : newsData.general?.length > 0 ? 'Medium' : 'Low',
-      communityEngagement: determineCommunityEngagement(newsData.reddit)
+      communityEngagement: determineCommunityEngagement(newsData.reddit),
+      orderBookSentiment: newsData.orderBookSentiment?.sentiment || 'Unknown'
     };
 
     return {
@@ -817,13 +1090,20 @@ Keep it under 1500 characters total. DO NOT mention other cryptocurrencies unles
       fallbackBriefing += `**NOTE:** AI analysis temporarily unavailable.`;
     }
     
+    if (newsData.orderBookSentiment) {
+      const depth = newsData.orderBookSentiment;
+      const imbalancePercent = Number.isFinite(depth.imbalance) ? (depth.imbalance * 100).toFixed(1) : '0.0';
+      fallbackBriefing += `\n\n**ORDER BOOK SENTIMENT:** ${depth.sentiment} (${imbalancePercent}% imbalance, ${depth.exchange} ${depth.pair})`;
+    }
+    
     return {
       briefing: fallbackBriefing,
       totalSources: totalSources,
       analysis: {
         marketActivity: 'Unknown',
         newsVolume: 'Limited',
-        communityEngagement: 'Unknown'
+        communityEngagement: 'Unknown',
+        orderBookSentiment: newsData.orderBookSentiment?.sentiment || 'Unknown'
       },
       error: 'AI analysis unavailable'
     };
@@ -839,6 +1119,13 @@ function generateProfessionalBriefing(newsData, comprehensiveBriefing, symbol) {
   output += `• Market Activity: ${comprehensiveBriefing.analysis.marketActivity}\n`;
   output += `• News Volume: ${comprehensiveBriefing.analysis.newsVolume}\n`;
   output += `• Community Engagement: ${comprehensiveBriefing.analysis.communityEngagement}\n`;
+  if (newsData.orderBookSentiment) {
+    const depth = newsData.orderBookSentiment;
+    const imbalancePercent = Number.isFinite(depth.imbalance) ? (depth.imbalance * 100).toFixed(1) : '0.0';
+    output += `• Order Book: ${depth.sentiment} (${imbalancePercent}% imbalance, ${depth.exchange} ${depth.pair})\n`;
+  } else {
+    output += `• Order Book: ${comprehensiveBriefing.analysis.orderBookSentiment || 'Unknown'}\n`;
+  }
   output += `• Premium Sources: ${newsData.totalQualitySources || comprehensiveBriefing.totalSources}\n\n`;
 
   const briefingText = comprehensiveBriefing.briefing || '';
@@ -905,6 +1192,18 @@ function generateProfessionalBriefing(newsData, comprehensiveBriefing, symbol) {
     }
   }
 
+  if (newsData.orderBookSentiment) {
+    const depth = newsData.orderBookSentiment;
+    const imbalancePercent = Number.isFinite(depth.imbalance) ? (depth.imbalance * 100).toFixed(1) : '0.0';
+    const bidShare = Number.isFinite(depth.bidSharePercent) ? depth.bidSharePercent.toFixed(1) : '0.0';
+    const askShare = Number.isFinite(depth.askSharePercent) ? depth.askSharePercent.toFixed(1) : '0.0';
+    const spread = Number.isFinite(depth.spreadPercent) ? (depth.spreadPercent * 100).toFixed(3) : 'N/A';
+    output += `📊 ORDER BOOK LIQUIDITY\n`;
+    output += `• ${depth.exchange} ${depth.pair} → ${depth.sentiment} (${imbalancePercent}% imbalance)\n`;
+    output += `• Bid Liquidity $${formatLiquidityNumber(depth.bidVolumeUsd)} (${bidShare}% depth) | Ask $${formatLiquidityNumber(depth.askVolumeUsd)} (${askShare}% depth)\n`;
+    output += `• Spread ${spread}% | Top Bid ${formatOrderBookPrice(depth.topBid.price)} (${formatOrderBookQuantity(depth.topBid.quantity)}) vs Top Ask ${formatOrderBookPrice(depth.topAsk.price)} (${formatOrderBookQuantity(depth.topAsk.quantity)})\n\n`;
+  }
+
   // Add whale activity from X if present
   if (newsData.twitter && newsData.twitter.length > 0) {
     const whaleTwitter = newsData.twitter.filter(t => t.isWhaleAccount);
@@ -935,6 +1234,11 @@ function generateProfessionalBriefing(newsData, comprehensiveBriefing, symbol) {
   if (newsData.sourceBreakdown) {
     const breakdown = newsData.sourceBreakdown;
     output += `• CryptoCompare: ${breakdown.cryptoCompare || 0} | CryptoPanic: ${breakdown.cryptoPanic || 0} | RSS: ${breakdown.rss || 0} | Google: ${breakdown.google || 0}\n`;
+  }
+  if (newsData.orderBookSentiment) {
+    output += `• Order Book Source: ${newsData.orderBookSentiment.exchange} ${newsData.orderBookSentiment.pair}\n`;
+  } else {
+    output += `• Order Book Source: N/A\n`;
   }
   output += `• Activity Alerts: ${newsData.activityDetected ? '🟢 Detected' : '⚪ None'}\n\n`;
 
