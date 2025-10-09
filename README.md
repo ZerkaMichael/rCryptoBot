@@ -1,4 +1,4 @@
-# rCryptoBot
+# 🤖 rCryptoBot
 
 ![Version](https://img.shields.io/badge/version-1.1.1-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D14.0.0-brightgreen)
